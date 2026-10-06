@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Prospect Map Europe — V6</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--bg:#f3f5f7;--ink:#17202a;--blue:#2563eb;--line:#d9dee5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+header{background:#111827;color:#fff;padding:15px 16px}
+h1{margin:0;font-size:21px}.subtitle{font-size:12px;opacity:.75;margin-top:3px}
+.controls{background:#fff;padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px;position:sticky;top:0;z-index:1000;box-shadow:0 2px 8px #0001}
+select,input,button{width:100%;padding:10px 11px;border-radius:9px;border:1px solid var(--line);background:#fff;font:inherit}
+button{background:#111827;color:#fff;border:0;font-weight:600}.light{background:#eef1f5;color:#17202a}
+#map{height:60vh;min-height:430px;background:#dce9f2}
+#status{background:#fff;padding:8px 12px;font-size:13px;border-bottom:1px solid #eee}
+.card{background:#fff;margin:10px;border-radius:12px;padding:12px;box-shadow:0 2px 9px #0001}
+.card h2{font-size:16px;margin:0 0 6px}.muted{color:#667085;font-size:13px}
+.regions{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:7px;margin-top:9px}
+.region{padding:10px;border:1px solid var(--line);border-radius:9px;background:#f8fafc;font-size:13px;text-align:left}
+.region.active{border-color:var(--blue);background:#eaf1ff;font-weight:700}
+.leaflet-tooltip.region-tip{background:#111827;color:#fff;border:0;border-radius:5px;font-size:11px;font-weight:600;padding:4px 6px}
+.badge{display:inline-block;background:#e8eef8;border-radius:999px;padding:3px 8px;font-size:11px;margin-top:5px}
+.prospect{padding:9px 0;border-bottom:1px solid #eee}.prospect strong{display:block}
+@media(max-width:600px){.controls{grid-template-columns:1fr}.regions{grid-template-columns:1fr 1fr}#map{height:56vh;min-height:390px}}
+</style>
+</head>
+<body>
+<header>
+<h1>Prospect Map Europe</h1>
+<div class="subtitle">Pays → régions → prospects</div>
+</header>
+
+<div class="controls">
+<select id="country"><option value="">🌍 Choisir un pays</option></select>
+<select id="region" disabled><option value="">📍 Choisir une région</option></select>
+<input id="search" placeholder="🔎 Rechercher un pays ou une région">
+<button id="europe" class="light">← Revenir à l’Europe</button>
+</div>
+
+<div id="status">Chargement…</div>
+<div id="map"></div>
+
+<section class="card">
+<h2 id="title">Europe</h2>
+<div id="info" class="muted">Clique sur un pays pour afficher ses régions.</div>
+<div id="regions" class="regions"></div>
+</section>
+
+<section class="card">
+<h2>Prospects de la région</h2>
+<div id="selected" class="muted">Aucune région sélectionnée.</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:9px">
+<input id="company" placeholder="Entreprise">
+<input id="city" placeholder="Ville">
+</div>
+<button id="add" style="margin-top:8px">+ Ajouter le prospect</button>
+<div id="prospects" style="margin-top:8px"></div>
+</section>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const COUNTRY_URL="https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
+const REGION_URL="https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_1_states_provinces.geojson";
+
+const EUROPE=new Set(["ALB","AND","AUT","BEL","BGR","BIH","BLR","CHE","CYP","CZE","DEU","DNK","ESP","EST","FIN","FRA","GBR","GRC","HRV","HUN","IRL","ISL","ITA","LIE","LTU","LUX","LVA","MCO","MDA","MKD","MLT","MNE","NLD","NOR","POL","PRT","ROU","RUS","SMR","SRB","SVK","SVN","SWE","TUR","UKR","VAT","XKX"]);
+
+const map=L.map("map",{zoomControl:true}).setView([54,15],4);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18,attribution:"© OpenStreetMap"}).addTo(map);
+
+let countries=[],regions=[],countryLayer,regionLayer,selectedCountry=null,selectedRegion=null;
+let prospects=JSON.parse(localStorage.getItem("prospectMapV6")||"[]");
+
+const $=x=>document.getElementById(x);
+
+function code(f){
+ const p=f.properties||{};
+ return String(p.ADM0_A3||p.adm0_a3||p.ADM0_A3_IS||p.iso_a3||p.ISO_A3||"").toUpperCase();
+}
+function cname(f){
+ const p=f.properties||{};
+ return p.ADMIN||p.admin||p.NAME_EN||p.name_en||p.NAME||p.name||"Pays";
+}
+function rname(f){
+ const p=f.properties||{};
+ return p.name||p.NAME_1||p.name_en||p.NAME||p.province||"Région";
+}
+function rcode(f){
+ const p=f.properties||{};
+ return p.iso_3166_2||p.ISO_3166_2||p.code_hasc||p.HASC_1||rname(f);
+}
+function rcountry(f){
+ const p=f.properties||{};
+ return String(p.adm0_a3||p.ADM0_A3||p.iso_a3||p.ISO_A3||"").toUpperCase();
+}
+function countryStyle(){return{color:"#475569",weight:1,fillColor:"#8eb8d8",fillOpacity:.68}}
+function regionStyle(){return{color:"#475569",weight:1,fillColor:"#65a3d5",fillOpacity:.55}}
+function selectedRegionStyle(){return{color:"#111827",weight:3,fillColor:"#f59e0b",fillOpacity:.7}}
+
+function setStatus(t){$("status").textContent=t}
+function clearRegionLayer(){if(regionLayer){map.removeLayer(regionLayer);regionLayer=null}}
+
+function showEurope(){
+ selectedCountry=null;selectedRegion=null;clearRegionLayer();
+ if(countryLayer)countryLayer.eachLayer(l=>l.setStyle(countryStyle()));
+ $("country").value="";$("region").innerHTML='<option value="">📍 Choisir une région</option>';$("region").disabled=true;
+ $("title").textContent="Europe";$("info").textContent="Clique sur un pays pour afficher ses régions.";
+ $("regions").innerHTML="";$("selected").textContent="Aucune région sélectionnée.";
+ $("prospects").innerHTML="";
+ map.setView([54,15],4);setStatus("Europe — "+countries.length+" pays interactifs.");
+}
+
+function getRegionsForCountry(c){
+ const a=regions.filter(f=>rcountry(f)===code(c));
+ // Fallback utile pour certaines données dont le code pays est absent.
+ if(a.length)return a;
+ return regions.filter(f=>String((f.properties||{}).admin||"").toLowerCase()===cname(c).toLowerCase());
+}
+
+function populateRegionUI(list){
+ $("region").innerHTML='<option value="">📍 Choisir une région</option>';
+ $("regions").innerHTML="";
+ list.slice().sort((a,b)=>rname(a).localeCompare(rname(b),"fr")).forEach(f=>{
+   const o=document.createElement("option");o.value=rcode(f);o.textContent=rname(f);$("region").appendChild(o);
+   const b=document.createElement("button");b.className="region";b.textContent=rname(f);
+   b.onclick=()=>selectRegion(f);$("regions").appendChild(b);
+ });
+ $("region").disabled=list.length===0;
+}
+
+function selectCountry(c){
+ selectedCountry=c;selectedRegion=null;
+ const list=getRegionsForCountry(c);
+ $("country").value=code(c);
+ $("title").textContent=cname(c);
+ $("info").textContent=list.length+" région(s) trouvée(s). Clique sur une région sur la carte ou dans la liste.";
+ populateRegionUI(list);$("selected").textContent="Aucune région sélectionnée.";
+ $("prospects").innerHTML="";
+ if(countryLayer)countryLayer.eachLayer(l=>l.setStyle(code(l.feature)===code(c)?{...countryStyle(),fillOpacity:.35,weight:3}:{...countryStyle(),fillOpacity:.12}));
+ clearRegionLayer();
+ if(list.length){
+   regionLayer=L.geoJSON({type:"FeatureCollection",features:list},{
+     style:regionStyle,
+     onEachFeature:(f,l)=>{
+       l.bindTooltip(rname(f),{sticky:true,className:"region-tip"});
+       l.on("click",()=>selectRegion(f));
+       l.on("mouseover",()=>l.setStyle({weight:2.5,fillOpacity:.8}));
+       l.on("mouseout",()=>{if(!selectedRegion||rcode(selectedRegion)!==rcode(f))regionLayer.resetStyle(l)});
+     }
+   }).addTo(map);
+   try{map.fitBounds(regionLayer.getBounds(),{padding:[18,18],maxZoom:7})}catch(e){}
+   setStatus(cname(c)+" — régions interactives.");
+ }else setStatus(cname(c)+" — aucune région disponible dans la source cartographique.");
+}
+
+function selectRegion(f){
+ selectedRegion=f;
+ const name=rname(f);
+ $("region").value=rcode(f);
+ $("title").textContent=(selectedCountry?cname(selectedCountry)+" — ":"")+name;
+ $("info").textContent="Région sélectionnée : "+name;
+ $("selected").innerHTML="<strong>"+esc(name)+"</strong><br><span class='muted'>"+esc(selectedCountry?cname(selectedCountry):"")+"</span>";
+ if(regionLayer)regionLayer.eachLayer(l=>l.setStyle(rcode(l.feature)===rcode(f)?selectedRegionStyle():regionStyle()));
+ const list=prospects.filter(p=>p.regionCode===rcode(f));
+ renderProspects(list);
+}
+
+function renderProspects(list){
+ $("prospects").innerHTML="";
+ if(!list.length){$("prospects").innerHTML='<div class="muted">Aucun prospect enregistré.</div>';return}
+ list.forEach(p=>{
+  const d=document.createElement("div");d.className="prospect";
+  d.innerHTML="<strong>"+esc(p.company)+"</strong><span class='muted'>"+esc(p.city||"")+"</span>";
+  $("prospects").appendChild(d);
+ });
+}
+function esc(s){return String(s||"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
+
+$("country").onchange=e=>{
+ const c=countries.find(f=>code(f)===e.target.value);c?selectCountry(c):showEurope();
+};
+$("region").onchange=e=>{
+ const f=regions.find(x=>rcode(x)===e.target.value);if(f)selectRegion(f);
+};
+$("europe").onclick=showEurope;
+$("search").oninput=e=>{
+ const q=e.target.value.trim().toLowerCase();if(!q)return;
+ const c=countries.find(f=>cname(f).toLowerCase().includes(q));
+ if(c){selectCountry(c);return}
+ const r=regions.find(f=>rname(f).toLowerCase().includes(q));
+ if(r){
+   const c=countries.find(x=>code(x)===rcountry(r));
+   if(c){selectCountry(c);setTimeout(()=>selectRegion(r),120)}
+ }
+};
+$("add").onclick=()=>{
+ if(!selectedRegion){alert("Sélectionne d’abord une région.");return}
+ const company=$("company").value.trim();
+ if(!company){alert("Indique le nom de l’entreprise.");return}
+ prospects.push({company,city:$("city").value.trim(),regionCode:rcode(selectedRegion),region:rname(selectedRegion),country:selectedCountry?cname(selectedCountry):""});
+ localStorage.setItem("prospectMapV6",JSON.stringify(prospects));
+ $("company").value="";$("city").value="";
+ renderProspects(prospects.filter(p=>p.regionCode===rcode(selectedRegion)));
+};
+
+function load(){
+ Promise.all([
+  fetch(COUNTRY_URL).then(r=>r.json()),
+  fetch(REGION_URL).then(r=>r.json())
+ ]).then(([c,r])=>{
+   countries=c.features.filter(f=>EUROPE.has(code(f)));
+   regions=r.features.filter(f=>EUROPE.has(rcountry(f)));
+   countryLayer=L.geoJSON({type:"FeatureCollection",features:countries},{
+     style:countryStyle,
+     onEachFeature:(f,l)=>{
+       l.bindTooltip(cname(f),{sticky:true});
+       l.on("click",()=>selectCountry(f));
+       l.on("mouseover",()=>l.setStyle({...countryStyle(),weight:2,fillOpacity:.85}));
+       l.on("mouseout",()=>{if(!selectedCountry||code(selectedCountry)!==code(f))countryLayer.resetStyle(l)});
+     }
+   }).addTo(map);
+   countries.slice().sort((a,b)=>cname(a).localeCompare(cname(b),"fr")).forEach(f=>{
+     const o=document.createElement("option");o.value=code(f);o.textContent=cname(f);$("country").appendChild(o);
+   });
+   setStatus("Europe chargée — "+countries.length+" pays interactifs.");
+ }).catch(e=>{console.error(e);setStatus("Impossible de charger la carte. Recharge la page.");});
+}
+load();
+</script>
+</body>
+</html>
